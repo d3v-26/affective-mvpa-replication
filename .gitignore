@@ -16,8 +16,6 @@ extracted_betas/
 *.log
 slurm-*.out
 
-# PDFs (large binaries)
-*.pdf
 
 # OS
 .DS_Store
