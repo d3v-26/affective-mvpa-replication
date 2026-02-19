@@ -33,6 +33,7 @@ fmriprep/
 deepprep/
 SPM/
 spm/
+dist/
 
 # Node
 node_modules/
