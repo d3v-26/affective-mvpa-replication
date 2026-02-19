@@ -1407,6 +1407,19 @@ export default function App() {
             <div style={{ marginTop: 16, padding: 14, background: "rgba(129,140,248,0.06)", border: "1px solid rgba(129,140,248,0.15)", borderRadius: 8, fontSize: 12, lineHeight: 1.7, color: "rgba(255,255,255,0.55)" }}>
               Convolve each trial onset with this HRF to produce one column of the design matrix X. Peak response at ~6s means BOLD peaks 2&ndash;3 TRs after stimulus.
             </div>
+
+            <div style={{ marginTop: 16, padding: 14, background: "rgba(129,140,248,0.06)", border: "1px solid rgba(129,140,248,0.15)", borderRadius: 8, fontSize: 12, lineHeight: 1.7, color: "rgba(255,255,255,0.55)" }}>
+              Trial Onset Times
+              <ol>
+              <li>Trial    Condition    Onset (scan #)</li>
+              <li>Pl1      Pleasant     3</li>
+              <li>Nt1      Neutral      8</li>
+              <li>Up1      Unpleasant   13</li>
+              <li>Pl2      Pleasant     ... (from Run 2 in the full experiment)</li>
+              <li>Nt2      Neutral      ...</li>
+              <li>Up2      Unpleasant   ...</li>
+              </ol>
+            </div>
           </>
         )}
 
