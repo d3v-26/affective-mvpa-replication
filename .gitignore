@@ -33,3 +33,8 @@ fmriprep/
 deepprep/
 SPM/
 spm/
+
+# Node
+node_modules/
+
+my-bold-viz/node_modules/*
