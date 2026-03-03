@@ -202,10 +202,21 @@ def find_t1w(anat_dir: Path) -> Path:
 
 
 def find_bold_runs(func_dir: Path) -> list[Path]:
-    """Return sorted list of BOLD NIfTIs in func_dir. Must be exactly N_RUNS."""
-    candidates = sorted(func_dir.glob("*.nii.gz"))
+    """Return sorted list of BOLD NIfTIs in func_dir. Must be exactly N_RUNS.
+
+    Files ending in _bolda.nii.gz or _boldb.nii.gz (extra acquisitions present
+    in sub-001 and sub-002) are ignored.
+    """
+    candidates = sorted(
+        f for f in func_dir.glob("*.nii.gz")
+        if not (f.stem.endswith("_bolda") or f.stem.endswith("_boldb")
+                or f.name.endswith("_bolda.nii.gz") or f.name.endswith("_boldb.nii.gz"))
+    )
     if not candidates:
-        candidates = sorted(func_dir.glob("*.nii"))
+        candidates = sorted(
+            f for f in func_dir.glob("*.nii")
+            if not (f.stem.endswith("_bolda") or f.stem.endswith("_boldb"))
+        )
     if len(candidates) != N_RUNS:
         raise ValueError(
             f"{func_dir}: expected {N_RUNS} BOLD files, found {len(candidates)}"
@@ -327,8 +338,13 @@ def main():
             bold_dst = dst_func / f"{bold_base}.nii.gz"
             shutil.copy2(bold_src, bold_dst)
 
-            # Load onset file
-            onset_name = f"Sub{orig_id:02d}run{run_idx}.mat"
+            # Load onset file.
+            # orig sub 1–11  (new sub-001..sub-009): no underscore → Sub01run1.mat
+            # orig sub 12–20 (new sub-010..sub-016): underscore    → Sub14_run1.mat
+            if orig_id >= 12:
+                onset_name = f"Sub{orig_id:02d}_run{run_idx}.mat"
+            else:
+                onset_name = f"Sub{orig_id:02d}run{run_idx}.mat"
             onset_path = onset_dir / onset_name
             if not onset_path.exists():
                 msg = f"  ERROR: onset file not found: {onset_path}"
