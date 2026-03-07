@@ -36,7 +36,7 @@ for i = 1:N_SUBS
     fprintf('\n===== Subject sub-%s (orig %02d) =====\n', sid, orig_id);
 
     % Per-subject directories
-    sub_deepprep = fullfile(deepprep_dir, ['sub-' sid], 'func');
+    sub_deepprep = fullfile(deepprep_dir, 'BOLD', ['sub-' sid], 'func');
     tmp_sub_dir  = fullfile(tmp_base, ['sub-' sid]);
     beta_out     = fullfile(betas_base, ['beta_series_sub-' sid]);
     mkdir(tmp_sub_dir);
