@@ -120,7 +120,8 @@ for i = 1:N_SUBS
         spm_smooth(bold_for_smooth, smoothed_nii, [8 8 8]);
 
         % Collect smoothed volume list for SPM
-        smooth_pattern = ['^s' strrep(bold_nii_name, '.nii', '') '.*\.nii$'];
+        [~, sname, ~] = fileparts(smoothed_nii);
+        smooth_pattern = ['^' sname '\.nii$'];
         % Use ExtFPList for 4D NIfTI (returns one entry per volume)
         tmp{j} = spm_select('ExtFPList', tmp_run_dir, smooth_pattern, Inf);
         fprintf('  Smoothed volumes collected: %d\n', size(tmp{j}, 1));

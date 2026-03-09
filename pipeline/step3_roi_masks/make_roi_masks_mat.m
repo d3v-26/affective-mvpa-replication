@@ -3,8 +3,8 @@ function make_roi_masks_mat()
 % Expects ROI nifti masks like: V1v_in_EPI.nii.gz with shape 53x63x46
 
 %% ===== CONFIG (EDIT THESE) =====
-roi_root = '/blue/ruogu.fang/pateld3/neuroimaging/rois_in_epi';      % folder containing ROI nii.gz files
-output = '/blue/ruogu.fang/pateld3/neuroimaging/output_mats';
+roi_root = '/blue/ruogu.fang/pateld3/neuroimaging/combined/rois_in_mni';      % folder containing ROI nii.gz files
+output = '/orange/ruogu.fang/pateld3/data/output_mats';
 out_path = fullfile(output, 'roi_masks.mat');
 
 % ROI names expected by your decoding script
@@ -14,7 +14,7 @@ roi_names = { ...
 };
 
 roi_suffix = '_in_EPI_bin.nii.gz';  % your naming convention
-expected_shape = [53 63 46];    % optional safety check; you can infer instead
+expected_shape = [97 115 97];    % optional safety check; you can infer instead
 
 %% ===== LOAD & BUILD STRUCT =====
 roi_masks = struct();
