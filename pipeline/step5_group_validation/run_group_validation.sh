@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=group_validation
-#SBATCH --output=/orange/ruogu.fang/pateld3/SPM_Preprocessed_fMRI_20Subjects/logs/group_validation_%j.log
-#SBATCH --error=/orange/ruogu.fang/pateld3/SPM_Preprocessed_fMRI_20Subjects/logs/group_validation_%j.err
+#SBATCH --output=/orange/ruogu.fang/pateld3/data/deepprep_group_mvpa_results/logs/group_validation_%j.log
+#SBATCH --error=/orange/ruogu.fang/pateld3/data/deepprep_group_mvpa_results/logs/group_validation_%j.err
 #SBATCH --mail-type=END,FAIL
 #SBATCH --mail-user=pateld3@ufl.edu
 #SBATCH --ntasks=1
@@ -27,15 +27,15 @@ module load python/3.10
 # conda activate neuroimaging  # Uncomment and adjust if using conda env
 
 # Set paths
-SCRIPT_DIR="/orange/ruogu.fang/pateld3/SPM_Preprocessed_fMRI_20Subjects/betas/"
-RESULTS_FILE="/orange/ruogu.fang/pateld3/SPM_Preprocessed_fMRI_20Subjects/single_mvpa_results/decoding_results_k5x100_v4.mat"
-OUTPUT_DIR="/orange/ruogu.fang/pateld3/SPM_Preprocessed_fMRI_20Subjects/group_mvpa_results"
-CHECKPOINT_DIR="/orange/ruogu.fang/pateld3/SPM_Preprocessed_fMRI_20Subjects/group_mvpa_results/checkpoints"
+SCRIPT_DIR="/orange/ruogu.fang/pateld3/data/"
+RESULTS_FILE="/orange/ruogu.fang/pateld3/data/single_mvpa_results/decoding_results_k5x100_v4.mat"
+OUTPUT_DIR="/orange/ruogu.fang/pateld3/data/deepprep_group_mvpa_results"
+CHECKPOINT_DIR="/orange/ruogu.fang/pateld3/data/deepprep_group_mvpa_results/checkpoints"
 
 # Create necessary directories
 mkdir -p $OUTPUT_DIR
 mkdir -p $CHECKPOINT_DIR
-mkdir -p /blue/ruogu.fang/pateld3/neuroimaging/logs
+mkdir -p /orange/ruogu.fang/pateld3/data/deepprep_group_mvpa_results/logs
 
 # Install required packages if not already installed
 #pip install --user numpy scipy matplotlib seaborn 2>&1 | tail -n 5

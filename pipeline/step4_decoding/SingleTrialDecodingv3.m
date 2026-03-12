@@ -30,9 +30,12 @@ roi_names_of_interest = {'whole_brain', 'V1v', 'V1d', 'V2v', 'V2d', 'V3v', 'V3d'
 num_subjects = 20;
 k_folds = 5;
 n_reps  = 100;
+n_shuffles = 100;
 
-PlNt_acc = NaN(num_subjects, numel(roi_names_of_interest));
-UpNt_acc = NaN(num_subjects, numel(roi_names_of_interest));
+PlNt_acc  = NaN(num_subjects, numel(roi_names_of_interest));
+UpNt_acc  = NaN(num_subjects, numel(roi_names_of_interest));
+PlNt_null = NaN(num_subjects, numel(roi_names_of_interest), n_shuffles);
+UpNt_null = NaN(num_subjects, numel(roi_names_of_interest), n_shuffles);
 
 %% ===================== MAIN LOOP =====================
 for roi_idx = 1:numel(roi_names_of_interest)
@@ -105,6 +108,22 @@ for roi_idx = 1:numel(roi_names_of_interest)
         if numel(unique(UpNt_labels))>1
             UpNt_acc(subj,roi_idx) = svm_kfold_repeated(UpNt_data, UpNt_labels, k_folds, n_reps);
         end
+
+        % Null distributions: 100 label-shuffle runs per subject per ROI
+        pn_null = zeros(1, n_shuffles);
+        un_null = zeros(1, n_shuffles);
+        for sh = 1:n_shuffles
+            pn_labels_shuf = PlNt_labels(randperm(length(PlNt_labels)));
+            un_labels_shuf = UpNt_labels(randperm(length(UpNt_labels)));
+            if numel(unique(pn_labels_shuf))>1
+                pn_null(sh) = svm_kfold_repeated(PlNt_data, pn_labels_shuf, k_folds, n_reps);
+            end
+            if numel(unique(un_labels_shuf))>1
+                un_null(sh) = svm_kfold_repeated(UpNt_data, un_labels_shuf, k_folds, n_reps);
+            end
+        end
+        PlNt_null(subj, roi_idx, :) = pn_null;
+        UpNt_null(subj, roi_idx, :) = un_null;
     end
 end
 
@@ -122,7 +141,8 @@ for r = 1:numel(roi_names_of_interest)
 end
 
 save(fullfile(output_dir, 'decoding_results_k5x100_v4.mat'), ...
-     'PlNt_acc','UpNt_acc','mean_PN_acc','sem_PN_acc','mean_UN_acc','sem_UN_acc','roi_names_of_interest','k_folds','n_reps');
+     'PlNt_acc','UpNt_acc','PlNt_null','UpNt_null', ...
+     'mean_PN_acc','sem_PN_acc','mean_UN_acc','sem_UN_acc','roi_names_of_interest','k_folds','n_reps','n_shuffles');
 
 %% ===================== PLOTS =====================
 % Generate a colormap for distinct ROI colors

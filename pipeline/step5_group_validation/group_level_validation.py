@@ -78,27 +78,39 @@ class GroupLevelValidator:
         --------
         dict : Dictionary containing decoding accuracies and ROI names
         """
-        data = sio.loadmat(results_file)
+        try:
+            data = sio.loadmat(results_file)
+        except Exception as e:
+            raise IOError(f"Failed to load MAT file '{results_file}': {e}")
+
+        required = ['PlNt_acc', 'UpNt_acc', 'roi_names_of_interest']
+        missing = [v for v in required if v not in data]
+        if missing:
+            raise ValueError(f"MAT file missing required variables: {missing}. "
+                             f"Available variables: {[k for k in data if not k.startswith('_')]}")
+
+        # Load null distributions if present (produced by updated step4)
+        plnt_null = data.get('PlNt_null', None)
+        upnt_null = data.get('UpNt_null', None)
+
+        if plnt_null is None or upnt_null is None:
+            print("WARNING: MAT file does not contain 'PlNt_null'/'UpNt_null'. "
+                  "Falling back to binomial approximation for null distribution. "
+                  "Re-run step4 with the updated SingleTrialDecodingv3.m to use the "
+                  "correct per-subject label-shuffle methodology.")
 
         results = {
-            'PlNt_acc': data['PlNt_acc'],  # Pleasant vs Neutral
-            'UpNt_acc': data['UpNt_acc'],  # Unpleasant vs Neutral
+            'PlNt_acc':  data['PlNt_acc'],   # (n_subjects, n_rois)
+            'UpNt_acc':  data['UpNt_acc'],
+            'PlNt_null': plnt_null,           # (n_subjects, n_rois, 100) or None
+            'UpNt_null': upnt_null,
             'roi_names': [name[0] for name in data['roi_names_of_interest'][0]]
         }
 
         return results
 
     def save_checkpoint(self, checkpoint_data, checkpoint_name):
-        """
-        Save checkpoint to disk.
-
-        Parameters:
-        -----------
-        checkpoint_data : dict
-            Data to save
-        checkpoint_name : str
-            Name of checkpoint file
-        """
+        """Save checkpoint to disk."""
         checkpoint_path = self.checkpoint_dir / f"{checkpoint_name}.pkl"
         temp_path = checkpoint_path.with_suffix('.tmp')
 
@@ -112,18 +124,7 @@ class GroupLevelValidator:
             print(f"Warning: Failed to save checkpoint: {e}")
 
     def load_checkpoint(self, checkpoint_name):
-        """
-        Load checkpoint from disk.
-
-        Parameters:
-        -----------
-        checkpoint_name : str
-            Name of checkpoint file
-
-        Returns:
-        --------
-        dict or None : Checkpoint data if exists, None otherwise
-        """
+        """Load checkpoint from disk. Returns None if not found."""
         checkpoint_path = self.checkpoint_dir / f"{checkpoint_name}.pkl"
 
         if checkpoint_path.exists():
@@ -138,24 +139,28 @@ class GroupLevelValidator:
                 return None
         return None
 
-    def permutation_test_group_level(self, accuracies, roi_idx=None,
-                                     comparison_name='', resume=True):
+    def permutation_test_group_level(self, accuracies, null_dist=None,
+                                     roi_idx=None, comparison_name='', resume=True):
         """
         Perform group-level permutation test with checkpointing.
 
-        At the individual subject level, class labels were randomly shuffled
-        100 times. At the group level, one chance-level accuracy is randomly
-        extracted from each subject and averaged. This is repeated 10^5 times
-        to obtain empirical chance-level distribution.
+        Paper methodology (Bo et al. 2021):
+        - Subject level: class labels shuffled 100 times → 100 null accuracies per subject
+        - Group level: randomly pick one null accuracy per subject, average across subjects
+        - Repeat 10^5 times → empirical null distribution; threshold at p=0.001
 
         Parameters:
         -----------
         accuracies : ndarray
             Shape (n_subjects, n_rois) or (n_subjects,) for single ROI
+        null_dist : ndarray or None
+            Shape (n_subjects, n_rois, n_shuffles). If None, falls back to
+            binomial approximation.
         roi_idx : int, optional
             Index of specific ROI to test. If None, test all ROIs.
         comparison_name : str
-            Name for checkpoint file (e.g., 'PlNt', 'UpNt')
+            Name for checkpoint files (e.g., 'PlNt', 'UpNt'). Must be non-empty
+            to avoid checkpoint name collisions.
         resume : bool
             Whether to resume from checkpoint if available
 
@@ -163,10 +168,19 @@ class GroupLevelValidator:
         --------
         dict : Dictionary containing test results
         """
+        # Guard against 1D input
+        if accuracies.ndim == 1:
+            accuracies = accuracies[:, np.newaxis]
+        if null_dist is not None and null_dist.ndim == 2:
+            null_dist = null_dist[:, np.newaxis, :]
+
         if roi_idx is not None:
             accuracies = accuracies[:, roi_idx:roi_idx+1]
+            if null_dist is not None:
+                null_dist = null_dist[:, roi_idx:roi_idx+1, :]
 
         n_subjects, n_rois = accuracies.shape
+        use_paper_method = null_dist is not None
 
         results = {
             'mean_accuracy': np.nanmean(accuracies, axis=0),
@@ -177,14 +191,19 @@ class GroupLevelValidator:
             'threshold_accuracy': np.zeros(n_rois)
         }
 
-        # Perform permutation test for each ROI
         for roi in range(n_rois):
             print(f"\n[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
                   f"Processing ROI {roi+1}/{n_rois} ({comparison_name})")
 
             roi_acc = accuracies[:, roi]
-            roi_acc = roi_acc[~np.isnan(roi_acc)]
+            valid_mask = ~np.isnan(roi_acc)
+            roi_acc = roi_acc[valid_mask]
             n_valid_subjects = len(roi_acc)
+
+            # For paper method: null_dist_roi shape (n_valid_subjects, n_shuffles)
+            if use_paper_method:
+                null_dist_roi = null_dist[valid_mask, roi, :]  # (n_valid, n_shuffles)
+                n_shuffles = null_dist_roi.shape[1]
 
             checkpoint_name = f"{comparison_name}_roi{roi}"
 
@@ -194,26 +213,28 @@ class GroupLevelValidator:
                 checkpoint = self.load_checkpoint(checkpoint_name)
 
             if checkpoint is not None:
-                # Resume from checkpoint
                 chance_distribution = checkpoint['chance_distribution']
                 start_perm = checkpoint['completed_permutations']
                 print(f"  Resuming from permutation {start_perm}/{self.n_permutations}")
             else:
-                # Start fresh
                 chance_distribution = np.zeros(self.n_permutations)
                 start_perm = 0
-                print(f"  Starting new permutation test")
+                print(f"  Starting new permutation test "
+                      f"({'paper method' if use_paper_method else 'binomial fallback'})")
 
-            # Generate chance-level distribution at group level
             start_time = time.time()
 
             for perm in range(start_perm, self.n_permutations):
-                # Simulate chance-level accuracies for each subject
-                # Using binomial distribution as in classification tasks
-                subject_chance = np.random.binomial(100, 0.5, n_valid_subjects) / 100.0
-                chance_distribution[perm] = np.mean(subject_chance)
+                if use_paper_method:
+                    # Paper method: for each subject, pick one of their 100 null accuracies
+                    indices = np.random.randint(0, n_shuffles, size=n_valid_subjects)
+                    sampled = null_dist_roi[np.arange(n_valid_subjects), indices]
+                    chance_distribution[perm] = np.mean(sampled)
+                else:
+                    # Fallback: binomial approximation
+                    subject_chance = np.random.binomial(100, 0.5, n_valid_subjects) / 100.0
+                    chance_distribution[perm] = np.mean(subject_chance)
 
-                # Save checkpoint periodically
                 if (perm + 1) % self.checkpoint_interval == 0:
                     elapsed = time.time() - start_time
                     rate = self.checkpoint_interval / elapsed
@@ -234,11 +255,8 @@ class GroupLevelValidator:
                     self.save_checkpoint(checkpoint_data, checkpoint_name)
                     start_time = time.time()
 
-            # Calculate p-value: proportion of permuted values >= observed
             observed_mean = np.nanmean(roi_acc)
             p_value = np.sum(chance_distribution >= observed_mean) / self.n_permutations
-
-            # Determine threshold at specified alpha level
             threshold = np.percentile(chance_distribution, (1 - self.alpha) * 100)
 
             results['p_values'][roi] = p_value
@@ -248,7 +266,6 @@ class GroupLevelValidator:
             print(f"  Completed: Mean={observed_mean:.4f}, p={p_value:.4f}, "
                   f"Significant={'YES' if p_value < self.alpha else 'NO'}")
 
-            # Save final checkpoint
             checkpoint_data = {
                 'chance_distribution': chance_distribution,
                 'completed_permutations': self.n_permutations,
@@ -280,6 +297,10 @@ class GroupLevelValidator:
         --------
         dict : Dictionary containing t-test results
         """
+        # Guard against 1D input
+        if accuracies.ndim == 1:
+            accuracies = accuracies[:, np.newaxis]
+
         if roi_idx is not None:
             accuracies = accuracies[:, roi_idx:roi_idx+1]
 
@@ -296,10 +317,7 @@ class GroupLevelValidator:
             roi_acc = accuracies[:, roi]
             roi_acc = roi_acc[~np.isnan(roi_acc)]
 
-            # One-sample t-test against chance (0.5)
             t_stat, p_val = stats.ttest_1samp(roi_acc, self.chance_level)
-
-            # Cohen's d effect size
             cohen_d = (np.mean(roi_acc) - self.chance_level) / np.std(roi_acc, ddof=1)
 
             results['t_statistic'][roi] = t_stat
@@ -309,8 +327,8 @@ class GroupLevelValidator:
 
         return results
 
-    def visualize_results(self, accuracies, roi_names, comparison_name='',
-                         save_path=None):
+    def visualize_results(self, accuracies, roi_names, perm_results, ttest_results,
+                          comparison_name='', save_path=None):
         """
         Visualize group-level results with statistical annotations.
 
@@ -320,27 +338,24 @@ class GroupLevelValidator:
             Shape (n_subjects, n_rois)
         roi_names : list
             List of ROI names
+        perm_results : dict
+            Pre-computed permutation test results from permutation_test_group_level()
+        ttest_results : dict
+            Pre-computed t-test results from one_sample_ttest()
         comparison_name : str
             Name of comparison (e.g., 'Pleasant vs Neutral')
         save_path : str, optional
             Path to save figure
         """
-        # Perform statistical tests
-        perm_results = self.permutation_test_group_level(accuracies)
-        ttest_results = self.one_sample_ttest(accuracies)
-
-        # Create figure
         fig, axes = plt.subplots(2, 1, figsize=(14, 10))
 
         # Plot 1: Box plots with significance markers
         ax1 = axes[0]
         positions = np.arange(len(roi_names))
 
-        # Create box plot
         bp = ax1.boxplot(accuracies, positions=positions, widths=0.6,
                          patch_artist=True, showfliers=True)
 
-        # Color boxes based on significance
         for i, (box, is_sig) in enumerate(zip(bp['boxes'], perm_results['is_significant'])):
             if is_sig:
                 box.set_facecolor('lightcoral')
@@ -349,15 +364,12 @@ class GroupLevelValidator:
                 box.set_facecolor('lightgray')
                 box.set_alpha(0.5)
 
-        # Add chance level line
         ax1.axhline(y=0.5, color='k', linestyle='--', linewidth=1, label='Chance (50%)')
 
-        # Add threshold line (p < 0.001)
         threshold_mean = np.mean(perm_results['threshold_accuracy'])
         ax1.axhline(y=threshold_mean, color='r', linestyle='-.', linewidth=1,
                    label=f'Threshold (p < {self.alpha})')
 
-        # Add significance markers
         y_max = np.nanmax(accuracies) + 0.02
         for i, is_sig in enumerate(perm_results['is_significant']):
             if is_sig:
@@ -379,22 +391,16 @@ class GroupLevelValidator:
         means = perm_results['mean_accuracy']
         sems = perm_results['sem_accuracy']
 
-        # Create bar plot
         colors = ['coral' if sig else 'gray' for sig in perm_results['is_significant']]
-        bars = ax2.bar(positions, means, yerr=sems, capsize=5, alpha=0.7,
-                      color=colors, edgecolor='black', linewidth=1.5)
+        ax2.bar(positions, means, yerr=sems, capsize=5, alpha=0.7,
+                color=colors, edgecolor='black', linewidth=1.5)
 
-        # Add chance level line
         ax2.axhline(y=0.5, color='k', linestyle='--', linewidth=1, label='Chance')
         ax2.axhline(y=threshold_mean, color='r', linestyle='-.', linewidth=1,
                    label=f'p < {self.alpha}')
 
-        # Add p-values as text
         for i, (mean, p_val) in enumerate(zip(means, perm_results['p_values'])):
-            if p_val < 0.001:
-                p_text = 'p < 0.001'
-            else:
-                p_text = f'p = {p_val:.3f}'
+            p_text = 'p < 0.001' if p_val < 0.001 else f'p = {p_val:.3f}'
             ax2.text(i, mean + sems[i] + 0.01, p_text, ha='center',
                     va='bottom', fontsize=8, rotation=45)
 
@@ -415,9 +421,8 @@ class GroupLevelValidator:
 
         plt.show()
 
-        return perm_results, ttest_results
-
-    def print_summary_table(self, accuracies, roi_names, comparison_name=''):
+    def print_summary_table(self, accuracies, roi_names, perm_results, ttest_results,
+                            comparison_name=''):
         """
         Print formatted summary table of results.
 
@@ -427,12 +432,13 @@ class GroupLevelValidator:
             Shape (n_subjects, n_rois)
         roi_names : list
             List of ROI names
+        perm_results : dict
+            Pre-computed permutation test results from permutation_test_group_level()
+        ttest_results : dict
+            Pre-computed t-test results from one_sample_ttest()
         comparison_name : str
             Name of comparison
         """
-        perm_results = self.permutation_test_group_level(accuracies)
-        ttest_results = self.one_sample_ttest(accuracies)
-
         print(f"\n{'='*80}")
         print(f"GROUP-LEVEL VALIDATION RESULTS: {comparison_name}")
         print(f"{'='*80}")
@@ -441,12 +447,10 @@ class GroupLevelValidator:
         print(f"Number of subjects: {accuracies.shape[0]}")
         print(f"{'='*80}\n")
 
-        # Table header
         print(f"{'ROI':<15} {'Mean±SEM':<15} {'n':<5} {'p-value':<12} {'Sig':<5} "
               f"{'t-stat':<10} {'Cohen-d':<10}")
         print(f"{'-'*80}")
 
-        # Table rows
         for i, roi in enumerate(roi_names):
             mean = perm_results['mean_accuracy'][i]
             sem = perm_results['sem_accuracy'][i]
@@ -463,7 +467,6 @@ class GroupLevelValidator:
 
         print(f"{'-'*80}")
 
-        # Summary statistics
         n_significant = np.sum(perm_results['is_significant'])
         print(f"\nSignificant ROIs: {n_significant}/{len(roi_names)} "
               f"({100*n_significant/len(roi_names):.1f}%)")
@@ -501,17 +504,14 @@ def main():
 
     args = parser.parse_args()
 
-    # Configuration
-    results_file = args.results_file
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Initialize validator with checkpointing
     print(f"\n{'='*80}")
     print(f"GROUP-LEVEL VALIDATION WITH CHECKPOINTING")
     print(f"{'='*80}")
     print(f"Start time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print(f"Results file: {results_file}")
+    print(f"Results file: {args.results_file}")
     print(f"Output directory: {output_dir}")
     print(f"Checkpoint directory: {args.checkpoint_dir}")
     print(f"Number of permutations: {args.n_permutations:,}")
@@ -529,7 +529,7 @@ def main():
 
     try:
         print("Loading decoding results...")
-        results = validator.load_decoding_results(results_file)
+        results = validator.load_decoding_results(args.results_file)
 
         print(f"Data loaded: {results['PlNt_acc'].shape[0]} subjects, "
               f"{len(results['roi_names'])} ROIs\n")
@@ -545,17 +545,20 @@ def main():
 
             pn_perm = validator.permutation_test_group_level(
                 results['PlNt_acc'],
+                null_dist=results['PlNt_null'],
                 comparison_name='PlNt',
                 resume=not args.no_resume
             )
             pn_ttest = validator.one_sample_ttest(results['PlNt_acc'])
 
-            validator.print_summary_table(results['PlNt_acc'], results['roi_names'],
-                                          'Pleasant vs Neutral')
-
-            pn_perm_viz, pn_ttest_viz = validator.visualize_results(
-                results['PlNt_acc'],
-                results['roi_names'],
+            validator.print_summary_table(
+                results['PlNt_acc'], results['roi_names'],
+                pn_perm, pn_ttest,
+                comparison_name='Pleasant vs Neutral'
+            )
+            validator.visualize_results(
+                results['PlNt_acc'], results['roi_names'],
+                pn_perm, pn_ttest,
                 comparison_name='Pleasant vs Neutral',
                 save_path=str(output_dir / "PlNt_group_validation.png")
             )
@@ -568,17 +571,20 @@ def main():
 
             un_perm = validator.permutation_test_group_level(
                 results['UpNt_acc'],
+                null_dist=results['UpNt_null'],
                 comparison_name='UpNt',
                 resume=not args.no_resume
             )
             un_ttest = validator.one_sample_ttest(results['UpNt_acc'])
 
-            validator.print_summary_table(results['UpNt_acc'], results['roi_names'],
-                                          'Unpleasant vs Neutral')
-
-            un_perm_viz, un_ttest_viz = validator.visualize_results(
-                results['UpNt_acc'],
-                results['roi_names'],
+            validator.print_summary_table(
+                results['UpNt_acc'], results['roi_names'],
+                un_perm, un_ttest,
+                comparison_name='Unpleasant vs Neutral'
+            )
+            validator.visualize_results(
+                results['UpNt_acc'], results['roi_names'],
+                un_perm, un_ttest,
                 comparison_name='Unpleasant vs Neutral',
                 save_path=str(output_dir / "UpNt_group_validation.png")
             )
