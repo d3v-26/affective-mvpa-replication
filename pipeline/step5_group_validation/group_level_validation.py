@@ -15,12 +15,13 @@ Features:
 import numpy as np
 import scipy.io as sio
 from scipy import stats
+from statsmodels.stats.multitest import fdrcorrection
+import matplotlib
+matplotlib.use('Agg')  # Non-interactive backend for SLURM/HiPerGator
 import matplotlib.pyplot as plt
-import seaborn as sns
 from pathlib import Path
 import pickle
 import time
-import json
 from datetime import datetime
 import sys
 
@@ -37,7 +38,7 @@ class GroupLevelValidator:
     """
 
     def __init__(self, n_permutations=100000, alpha=0.001, checkpoint_dir=None,
-                 checkpoint_interval=5000):
+                 checkpoint_interval=5000, n_cv_trials=500):
         """
         Initialize validator.
 
@@ -51,11 +52,16 @@ class GroupLevelValidator:
             Directory to save checkpoints. If None, uses current directory
         checkpoint_interval : int
             Save checkpoint every N permutations (default: 5000)
+        n_cv_trials : int
+            Number of cross-validation evaluations per subject used in step4
+            (k_folds × n_repetitions = 5 × 100 = 500). Used only by the
+            binomial fallback when PlNt_null/UpNt_null are absent.
         """
         self.n_permutations = n_permutations
         self.alpha = alpha
         self.chance_level = 0.5  # Binary classification
         self.checkpoint_interval = checkpoint_interval
+        self.n_cv_trials = n_cv_trials
 
         # Setup checkpoint directory
         if checkpoint_dir is None:
@@ -168,6 +174,9 @@ class GroupLevelValidator:
         --------
         dict : Dictionary containing test results
         """
+        if not comparison_name:
+            raise ValueError("comparison_name must be non-empty to prevent checkpoint name collisions")
+
         # Guard against 1D input
         if accuracies.ndim == 1:
             accuracies = accuracies[:, np.newaxis]
@@ -231,8 +240,8 @@ class GroupLevelValidator:
                     sampled = null_dist_roi[np.arange(n_valid_subjects), indices]
                     chance_distribution[perm] = np.mean(sampled)
                 else:
-                    # Fallback: binomial approximation
-                    subject_chance = np.random.binomial(100, 0.5, n_valid_subjects) / 100.0
+                    # Fallback: binomial approximation using actual CV trial count
+                    subject_chance = np.random.binomial(self.n_cv_trials, 0.5, n_valid_subjects) / self.n_cv_trials
                     chance_distribution[perm] = np.mean(subject_chance)
 
                 if (perm + 1) % self.checkpoint_interval == 0:
@@ -325,6 +334,8 @@ class GroupLevelValidator:
             results['is_significant'][roi] = p_val < self.alpha
             results['cohen_d'][roi] = cohen_d
 
+        _, results['fdr_significant'] = fdrcorrection(results['p_values'], alpha=self.alpha)
+
         return results
 
     def visualize_results(self, accuracies, roi_names, perm_results, ttest_results,
@@ -366,9 +377,9 @@ class GroupLevelValidator:
 
         ax1.axhline(y=0.5, color='k', linestyle='--', linewidth=1, label='Chance (50%)')
 
-        threshold_mean = np.mean(perm_results['threshold_accuracy'])
-        ax1.axhline(y=threshold_mean, color='r', linestyle='-.', linewidth=1,
-                   label=f'Threshold (p < {self.alpha})')
+        thresholds = perm_results['threshold_accuracy']
+        ax1.scatter(positions, thresholds, marker='_', color='r', s=200, zorder=5,
+                    label=f'Threshold (p < {self.alpha})')
 
         y_max = np.nanmax(accuracies) + 0.02
         for i, is_sig in enumerate(perm_results['is_significant']):
@@ -396,8 +407,8 @@ class GroupLevelValidator:
                 color=colors, edgecolor='black', linewidth=1.5)
 
         ax2.axhline(y=0.5, color='k', linestyle='--', linewidth=1, label='Chance')
-        ax2.axhline(y=threshold_mean, color='r', linestyle='-.', linewidth=1,
-                   label=f'p < {self.alpha}')
+        ax2.scatter(positions, thresholds, marker='_', color='r', s=200, zorder=5,
+                    label=f'p < {self.alpha}')
 
         for i, (mean, p_val) in enumerate(zip(means, perm_results['p_values'])):
             p_text = 'p < 0.001' if p_val < 0.001 else f'p = {p_val:.3f}'
@@ -556,12 +567,6 @@ def main():
                 pn_perm, pn_ttest,
                 comparison_name='Pleasant vs Neutral'
             )
-            validator.visualize_results(
-                results['PlNt_acc'], results['roi_names'],
-                pn_perm, pn_ttest,
-                comparison_name='Pleasant vs Neutral',
-                save_path=str(output_dir / "PlNt_group_validation.png")
-            )
 
         # Test Unpleasant vs Neutral
         if args.comparison in ['both', 'UpNt']:
@@ -582,36 +587,42 @@ def main():
                 un_perm, un_ttest,
                 comparison_name='Unpleasant vs Neutral'
             )
-            validator.visualize_results(
-                results['UpNt_acc'], results['roi_names'],
-                un_perm, un_ttest,
-                comparison_name='Unpleasant vs Neutral',
-                save_path=str(output_dir / "UpNt_group_validation.png")
-            )
 
-        # Save results to file
+        # Save results to file (before visualization so results are always written)
         output_file = output_dir / "group_validation_results.mat"
         save_dict = {
-            'roi_names': results['roi_names'],
+            'roi_names': np.array(results['roi_names'], dtype=object),  # cell array for correct MATLAB reload
             'alpha': validator.alpha,
             'n_permutations': validator.n_permutations
         }
 
         if pn_perm is not None:
             save_dict.update({
+                'PlNt_mean_accuracy': pn_perm['mean_accuracy'],
+                'PlNt_sem_accuracy': pn_perm['sem_accuracy'],
+                'PlNt_n_subjects': pn_perm['n_subjects'],
                 'PlNt_perm_pvalues': pn_perm['p_values'],
                 'PlNt_perm_significant': pn_perm['is_significant'],
                 'PlNt_threshold': pn_perm['threshold_accuracy'],
                 'PlNt_ttest_pvalues': pn_ttest['p_values'],
+                'PlNt_ttest_tstat': pn_ttest['t_statistic'],
+                'PlNt_ttest_significant': pn_ttest['is_significant'],
+                'PlNt_fdr_significant': pn_ttest['fdr_significant'],
                 'PlNt_cohen_d': pn_ttest['cohen_d'],
             })
 
         if un_perm is not None:
             save_dict.update({
+                'UpNt_mean_accuracy': un_perm['mean_accuracy'],
+                'UpNt_sem_accuracy': un_perm['sem_accuracy'],
+                'UpNt_n_subjects': un_perm['n_subjects'],
                 'UpNt_perm_pvalues': un_perm['p_values'],
                 'UpNt_perm_significant': un_perm['is_significant'],
                 'UpNt_threshold': un_perm['threshold_accuracy'],
                 'UpNt_ttest_pvalues': un_ttest['p_values'],
+                'UpNt_ttest_tstat': un_ttest['t_statistic'],
+                'UpNt_ttest_significant': un_ttest['is_significant'],
+                'UpNt_fdr_significant': un_ttest['fdr_significant'],
                 'UpNt_cohen_d': un_ttest['cohen_d'],
             })
 
@@ -621,6 +632,23 @@ def main():
         print(f"Results saved to: {output_file}")
         print(f"End time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         print(f"{'='*80}\n")
+
+        # Visualize (after saving; non-blocking with Agg backend)
+        if pn_perm is not None:
+            validator.visualize_results(
+                results['PlNt_acc'], results['roi_names'],
+                pn_perm, pn_ttest,
+                comparison_name='Pleasant vs Neutral',
+                save_path=str(output_dir / "PlNt_group_validation.png")
+            )
+
+        if un_perm is not None:
+            validator.visualize_results(
+                results['UpNt_acc'], results['roi_names'],
+                un_perm, un_ttest,
+                comparison_name='Unpleasant vs Neutral',
+                save_path=str(output_dir / "UpNt_group_validation.png")
+            )
 
     except KeyboardInterrupt:
         print("\n\nInterrupted by user. Progress saved in checkpoints.")
