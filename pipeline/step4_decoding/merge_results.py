@@ -65,25 +65,38 @@ def load_per_subject_files(output_dir, num_subjects):
     UpNt_null : [num_subjects, n_rois, n_shuffles]
     k_folds, n_reps, n_shuffles : scalars (taken from first available file)
     """
-    n_rois     = len(ROI_NAMES)
     n_shuffles = None
     k_folds    = None
     n_reps     = None
 
-    # First pass: discover n_shuffles from any available file
+    # First pass: discover n_shuffles and check if any file is missing whole_brain
+    any_missing_whole_brain = False
     for subj in range(1, num_subjects + 1):
         path = os.path.join(output_dir, f"results_sub{subj:02d}.mat")
-        if os.path.isfile(path):
-            d = sio.loadmat(path, squeeze_me=True)
+        if not os.path.isfile(path):
+            continue
+        d = sio.loadmat(path, squeeze_me=True)
+        if n_shuffles is None:
             n_shuffles = int(d["n_shuffles"])
             k_folds    = int(d["k_folds"])
             n_reps     = int(d["n_reps"])
-            break
+        saved_rois = list(d["roi_names"])
+        if "whole_brain" not in saved_rois:
+            any_missing_whole_brain = True
 
     if n_shuffles is None:
         raise FileNotFoundError(
             f"No results_sub*.mat files found in {output_dir}"
         )
+
+    # If any subject is missing whole_brain, drop it from all to keep arrays aligned
+    roi_names = list(ROI_NAMES)
+    if any_missing_whole_brain and "whole_brain" in roi_names:
+        print("  Note: at least one subject file is missing 'whole_brain' ROI — "
+              "skipping whole_brain for all subjects.")
+        roi_names.remove("whole_brain")
+
+    n_rois = len(roi_names)
 
     # MATLAB: PlNt_acc  = NaN(num_subjects, numel(roi_names_of_interest))
     PlNt_acc  = np.full((num_subjects, n_rois),                np.nan)
@@ -100,24 +113,27 @@ def load_per_subject_files(output_dir, num_subjects):
 
         d = sio.loadmat(path, squeeze_me=True)
 
-        # Validate ROI names match
+        # Build column indices into this file's arrays that correspond to roi_names
         saved_rois = list(d["roi_names"])
-        if saved_rois != ROI_NAMES:
+        try:
+            col_idx = [saved_rois.index(r) for r in roi_names]
+        except ValueError as e:
             warnings.warn(
-                f"Sub {subj}: ROI names in file differ from expected. "
-                f"Got {saved_rois}. Proceeding by position."
+                f"Sub {subj}: expected ROI not found in file ({e}). "
+                "Skipping subject."
             )
+            continue
 
         # subj is 1-based; array index is 0-based  →  row = subj - 1
         row = subj - 1
-        PlNt_acc[row]     = d["PlNt_acc"]      # [n_rois]
-        UpNt_acc[row]     = d["UpNt_acc"]
-        PlNt_null[row]    = d["PlNt_null"]     # [n_rois, n_shuffles]
-        UpNt_null[row]    = d["UpNt_null"]
+        PlNt_acc[row]  = d["PlNt_acc"][col_idx]          # [n_rois]
+        UpNt_acc[row]  = d["UpNt_acc"][col_idx]
+        PlNt_null[row] = d["PlNt_null"][col_idx, :]      # [n_rois, n_shuffles]
+        UpNt_null[row] = d["UpNt_null"][col_idx, :]
         loaded.append(subj)
 
     print(f"\nLoaded {len(loaded)}/{num_subjects} subjects: {loaded}")
-    return PlNt_acc, UpNt_acc, PlNt_null, UpNt_null, k_folds, n_reps, n_shuffles
+    return PlNt_acc, UpNt_acc, PlNt_null, UpNt_null, k_folds, n_reps, n_shuffles, roi_names
 
 
 def compute_summary_stats(PlNt_acc, UpNt_acc):
@@ -259,26 +275,26 @@ def main():
     print(f"Merging results from {output_dir} …")
 
     # ── Load and assemble ────────────────────────────────────────────────────
-    PlNt_acc, UpNt_acc, PlNt_null, UpNt_null, k, n_reps, n_shuffles = \
+    PlNt_acc, UpNt_acc, PlNt_null, UpNt_null, k, n_reps, n_shuffles, roi_names = \
         load_per_subject_files(output_dir, num_subjects)
 
     # ── Summary statistics ───────────────────────────────────────────────────
     mean_PN, mean_UN, sem_PN, sem_UN = compute_summary_stats(PlNt_acc, UpNt_acc)
-    print_summary(ROI_NAMES, mean_PN, sem_PN, mean_UN, sem_UN)
+    print_summary(roi_names, mean_PN, sem_PN, mean_UN, sem_UN)
 
     # ── Save .mat ────────────────────────────────────────────────────────────
     save_results(
         output_dir, tag,
         PlNt_acc, UpNt_acc, PlNt_null, UpNt_null,
         mean_PN, sem_PN, mean_UN, sem_UN,
-        ROI_NAMES, k, n_reps, n_shuffles,
+        roi_names, k, n_reps, n_shuffles,
     )
 
     # ── Plots (mirrors MATLAB lines 147-179) ─────────────────────────────────
     # MATLAB: figure('Name','Pleasant vs Neutral'); boxplot(PlNt_acc, …)
     make_boxplot(
         PlNt_acc,
-        ROI_NAMES,
+        roi_names,
         title_str=f"Pleasant vs Neutral ({k}×{n_reps})",
         ylabel="Decoding accuracy (%)",
         out_path=os.path.join(output_dir, f"PlNtROI_{tag}.png"),
@@ -287,7 +303,7 @@ def main():
     # MATLAB: figure('Name','Unpleasant vs Neutral'); boxplot(UpNt_acc, …)
     make_boxplot(
         UpNt_acc,
-        ROI_NAMES,
+        roi_names,
         title_str=f"Unpleasant vs Neutral ({k}×{n_reps})",
         ylabel="Decoding accuracy (%)",
         out_path=os.path.join(output_dir, f"UpNtROI_{tag}.png"),

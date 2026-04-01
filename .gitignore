@@ -39,3 +39,4 @@ dist/
 node_modules/
 
 my-bold-viz/node_modules/*
+CONFOUNDS_PLAN.md
